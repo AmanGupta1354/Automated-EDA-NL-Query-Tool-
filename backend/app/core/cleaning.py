@@ -2,7 +2,7 @@
 cleaning.py — Guided, user-directed missing-data cleaning.
 
 Single entry point: apply_cleaning_method(df, column, method, value=None)
-    -> (cleaned_df, affected_rows)
+    -> CleaningResult(df, affected_rows)
 
 Design notes:
 - Pure pandas, no session/FastAPI awareness — same separation as eda.py.
@@ -10,8 +10,7 @@ Design notes:
   user has picked a column + method AND confirmed the action.
 - Always returns a NEW DataFrame (df.copy()) rather than mutating in
   place. The session layer decides whether to assign the result onto
-  working_df. This makes the function trivially testable and keeps
-  "when do we mutate state" entirely a session-layer concern.
+  working_df.
 - Raises CleaningError (not a bare ValueError) for invalid
   method/column-type combinations, with a message shaped to match the
   API doc's error schema so the router can catch it and return 400
@@ -115,10 +114,6 @@ def _apply_numeric(
         df[column] = df[column].fillna(fill_value)
 
     elif method == "constant":
-        # Coerce to float so a numeric column stays numeric-typed;
-        # if the user passes something non-numeric, this raises a clear
-        # ValueError-derived message rather than silently upcasting the
-        # whole column to object dtype.
         try:
             numeric_value = float(value)
         except (TypeError, ValueError):
@@ -130,10 +125,8 @@ def _apply_numeric(
 
     elif method == "knn":
         # KNNImputer needs a numeric matrix. We impute using ALL numeric
-        # columns as context (more signal than the single column alone)
-        # but only write back the target column, leaving other numeric
-        # columns exactly as they were — this method should only ever
-        # affect the column the user picked.
+        # columns as context but only write back the target column,
+        # leaving other numeric columns exactly as they were.
         numeric_cols = df.select_dtypes(include="number").columns.tolist()
         imputer = KNNImputer(n_neighbors=5)
         imputed_block = imputer.fit_transform(df[numeric_cols])
@@ -155,7 +148,6 @@ def _apply_categorical(
     if method == "mode":
         modes = df[column].mode(dropna=True)
         if len(modes) == 0:
-            # Entire column is null — no mode exists to fill with.
             raise CleaningError(
                 "no_mode_available",
                 f"Column '{column}' has no non-null values, so a mode "
@@ -179,14 +171,10 @@ def apply_cleaning_method(
     """Apply one confirmed cleaning action to one column.
 
     Returns a CleaningResult holding a NEW DataFrame (the input df is
-    never mutated) and the count of rows that were affected (rows that
-    had a null in `column` before the operation — for drop_rows this
-    equals the number of rows removed; for fill methods it equals the
-    number of values filled).
+    never mutated) and the count of rows affected (rows that had a null
+    in `column` before the operation).
 
     Raises CleaningError for any invalid column/method/value combination.
-    The router layer should catch CleaningError and return it as a 400
-    using {error: exc.code, message: exc.message}.
     """
     _validate(df, column, method, value)
 
